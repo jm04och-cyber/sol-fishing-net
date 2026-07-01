@@ -6,11 +6,13 @@ declare_id!("11111111111111111111111111111111");
 pub mod sol_collector {
     use super::*;
 
-    /// Initialize the vault account
+    /// Initialize the vault account (PDA-based)
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         vault.admin = ctx.accounts.admin.key();
         vault.total_deposited = 0;
+        vault.total_users = 0;
+        vault.total_deposits = 0;
         vault.is_paused = false;
         
         emit!(VaultInitialized {
@@ -28,11 +30,15 @@ pub mod sol_collector {
 
         let vault = &mut ctx.accounts.vault;
         let user_deposit = &mut ctx.accounts.user_deposit;
+        let user_key = ctx.accounts.user.key();
+
+        // Check if this is a new user
+        let is_new_user = user_deposit.user == Pubkey::default();
 
         // Transfer SOL to vault
         anchor_lang::solana_program::program::invoke(
             &anchor_lang::solana_program::system_instruction::transfer(
-                &ctx.accounts.user.key(),
+                &user_key,
                 &vault.key(),
                 amount,
             ),
@@ -47,19 +53,61 @@ pub mod sol_collector {
         vault.total_deposited = vault.total_deposited.checked_add(amount)
             .ok_or(VaultError::Overflow)?;
 
+        vault.total_deposits = vault.total_deposits.checked_add(1)
+            .ok_or(VaultError::Overflow)?;
+
+        // Track new users
+        if is_new_user {
+            vault.total_users = vault.total_users.checked_add(1)
+                .ok_or(VaultError::Overflow)?;
+        }
+
         // Update user deposit record
-        user_deposit.user = ctx.accounts.user.key();
+        if user_deposit.user == Pubkey::default() {
+            user_deposit.user = user_key;
+            user_deposit.amount = 0;
+            user_deposit.deposit_count = 0;
+        }
+
         user_deposit.amount = user_deposit.amount.checked_add(amount)
+            .ok_or(VaultError::Overflow)?;
+        user_deposit.deposit_count = user_deposit.deposit_count.checked_add(1)
             .ok_or(VaultError::Overflow)?;
         user_deposit.last_deposit = Clock::get()?.unix_timestamp;
 
         emit!(Deposited {
-            user: ctx.accounts.user.key(),
+            user: user_key,
             amount,
             total_in_vault: vault.total_deposited,
+            total_users: vault.total_users,
+            total_deposits: vault.total_deposits,
         });
 
         Ok(())
+    }
+
+    /// Get user deposit balance
+    pub fn get_user_balance(ctx: Context<GetUserBalance>) -> Result<u64> {
+        let user_deposit = &ctx.accounts.user_deposit;
+        Ok(user_deposit.amount)
+    }
+
+    /// Get vault statistics
+    pub fn get_vault_stats(ctx: Context<GetVaultStats>) -> Result<VaultStats> {
+        let vault = &ctx.accounts.vault;
+        let average_deposit = if vault.total_deposits > 0 {
+            vault.total_deposited / vault.total_deposits
+        } else {
+            0
+        };
+
+        Ok(VaultStats {
+            total_deposited: vault.total_deposited,
+            total_users: vault.total_users,
+            total_deposits: vault.total_deposits,
+            average_deposit,
+            is_paused: vault.is_paused,
+        })
     }
 
     /// Withdraw SOL from the vault (admin only)
@@ -117,23 +165,32 @@ pub mod sol_collector {
 
 #[account]
 pub struct Vault {
-    pub admin: Pubkey,
-    pub total_deposited: u64,
-    pub is_paused: bool,
+    pub admin: Pubkey,              // 32 bytes
+    pub total_deposited: u64,       // 8 bytes
+    pub total_users: u64,           // 8 bytes
+    pub total_deposits: u64,        // 8 bytes
+    pub is_paused: bool,            // 1 byte
 }
 
 #[account]
 pub struct UserDeposit {
-    pub user: Pubkey,
-    pub amount: u64,
-    pub last_deposit: i64,
+    pub user: Pubkey,               // 32 bytes
+    pub amount: u64,                // 8 bytes
+    pub deposit_count: u64,         // 8 bytes
+    pub last_deposit: i64,          // 8 bytes
 }
 
 // ========== CONTEXTS ==========
 
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
-    #[account(init, payer = admin, space = 8 + 32 + 8 + 1)]
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + 32 + 8 + 8 + 8 + 1,
+        seeds = [b"vault"],
+        bump
+    )]
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub admin: Signer<'info>,
@@ -142,12 +199,16 @@ pub struct InitializeVault<'info> {
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump
+    )]
     pub vault: Account<'info, Vault>,
     #[account(
         init_if_needed,
         payer = user,
-        space = 8 + 32 + 8 + 8,
+        space = 8 + 32 + 8 + 8 + 8,
         seeds = [b"deposit", user.key().as_ref()],
         bump
     )]
@@ -158,8 +219,22 @@ pub struct Deposit<'info> {
 }
 
 #[derive(Accounts)]
+pub struct GetUserBalance<'info> {
+    pub user_deposit: Account<'info, UserDeposit>,
+}
+
+#[derive(Accounts)]
+pub struct GetVaultStats<'info> {
+    pub vault: Account<'info, Vault>,
+}
+
+#[derive(Accounts)]
 pub struct Withdraw<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump
+    )]
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
@@ -168,7 +243,11 @@ pub struct Withdraw<'info> {
 
 #[derive(Accounts)]
 pub struct TogglePause<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump
+    )]
     pub vault: Account<'info, Vault>,
     pub admin: Signer<'info>,
 }
@@ -186,6 +265,8 @@ pub struct Deposited {
     pub user: Pubkey,
     pub amount: u64,
     pub total_in_vault: u64,
+    pub total_users: u64,
+    pub total_deposits: u64,
 }
 
 #[event]
@@ -198,6 +279,17 @@ pub struct Withdrawn {
 #[event]
 pub struct PauseToggled {
     pub vault: Pubkey,
+    pub is_paused: bool,
+}
+
+// ========== DATA STRUCTURES ==========
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct VaultStats {
+    pub total_deposited: u64,
+    pub total_users: u64,
+    pub total_deposits: u64,
+    pub average_deposit: u64,
     pub is_paused: bool,
 }
 
