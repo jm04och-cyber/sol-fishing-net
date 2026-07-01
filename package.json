@@ -1,0 +1,25 @@
+{
+  "name": "sol-fishing-net",
+  "version": "0.1.0",
+  "description": "Solana SOL token collector program (fishing net)",
+  "main": "index.js",
+  "scripts": {
+    "build": "anchor build",
+    "test": "anchor test",
+    "deploy:local": "anchor deploy --provider.cluster localnet",
+    "deploy:devnet": "anchor deploy --provider.cluster devnet",
+    "deploy:mainnet": "anchor deploy --provider.cluster mainnet"
+  },
+  "keywords": ["solana", "anchor", "smart-contract", "defi"],
+  "author": "jm04och-cyber",
+  "license": "MIT",
+  "devDependencies": {
+    "@project-serum/anchor": "^0.29.0",
+    "@project-serum/ts-client-gen": "^0.0.6",
+    "@solana/web3.js": "^1.88.0",
+    "chai": "^4.3.10",
+    "mocha": "^10.2.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.3.0"
+  }
+}
